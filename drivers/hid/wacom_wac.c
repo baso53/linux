@@ -1134,6 +1134,7 @@ static int wacom_remote_irq(struct wacom_wac *wacom_wac, size_t len)
 	if (index < 0 || !remote->remotes[index].registered)
 		goto out;
 
+	remote->remotes[i].active_time = ktime_get();
 	input = remote->remotes[index].input;
 
 	input_report_key(input, BTN_0, (data[9] & 0x01));
@@ -1196,22 +1197,20 @@ static void wacom_remote_status_irq(struct wacom_wac *wacom_wac, size_t len)
 	struct wacom *wacom = container_of(wacom_wac, struct wacom, wacom_wac);
 	unsigned char *data = wacom_wac->data;
 	struct wacom_remote *remote = wacom->remote;
-	struct wacom_remote_data remote_data;
+	struct wacom_remote_work_data remote_data;
 	unsigned long flags;
 	int i, ret;
 
 	if (data[0] != WACOM_REPORT_DEVICE_LIST)
 		return;
 
-	memset(&remote_data, 0, sizeof(struct wacom_remote_data));
+	memset(&remote_data, 0, sizeof(struct wacom_remote_work_data));
 
 	for (i = 0; i < WACOM_MAX_REMOTES; i++) {
 		int j = i * 6;
 		int serial = (data[j+6] << 16) + (data[j+5] << 8) + data[j+4];
-		bool connected = data[j+2];
 
 		remote_data.remote[i].serial = serial;
-		remote_data.remote[i].connected = connected;
 	}
 
 	spin_lock_irqsave(&remote->remote_lock, flags);
@@ -1314,7 +1313,7 @@ static void wacom_intuos_pro2_bt_pen(struct wacom_wac *wacom)
 	struct input_dev *pen_input = wacom->pen_input;
 	unsigned char *data = wacom->data;
 	int number_of_valid_frames = 0;
-	int time_interval = 15000000;
+	ktime_t time_interval = 15000000;
 	ktime_t time_packet_received = ktime_get();
 	int i;
 
@@ -1348,7 +1347,7 @@ static void wacom_intuos_pro2_bt_pen(struct wacom_wac *wacom)
 	if (number_of_valid_frames) {
 		if (wacom->hid_data.time_delayed)
 			time_interval = ktime_get() - wacom->hid_data.time_delayed;
-		time_interval /= number_of_valid_frames;
+		time_interval = div_u64(time_interval, number_of_valid_frames);
 		wacom->hid_data.time_delayed = time_packet_received;
 	}
 
@@ -1359,7 +1358,7 @@ static void wacom_intuos_pro2_bt_pen(struct wacom_wac *wacom)
 		bool range = frame[0] & 0x20;
 		bool invert = frame[0] & 0x10;
 		int frames_number_reversed = number_of_valid_frames - i - 1;
-		int event_timestamp = time_packet_received - frames_number_reversed * time_interval;
+		ktime_t event_timestamp = time_packet_received - frames_number_reversed * time_interval;
 
 		if (!valid)
 			continue;
@@ -2650,8 +2649,8 @@ static void wacom_wac_finger_slot(struct wacom_wac *wacom_wac,
 {
 	struct hid_data *hid_data = &wacom_wac->hid_data;
 	bool mt = wacom_wac->features.touch_max > 1;
-	bool prox = hid_data->tipswitch &&
-		    report_touch_events(wacom_wac);
+	bool touch_down = hid_data->tipswitch && hid_data->confidence;
+	bool prox = touch_down && report_touch_events(wacom_wac);
 
 	if (touch_is_muted(wacom_wac)) {
 		if (!wacom_wac->shared->touch_down)
@@ -2699,24 +2698,6 @@ static void wacom_wac_finger_slot(struct wacom_wac *wacom_wac,
 				input_report_abs(input, ABS_MT_ORIENTATION, hid_data->width <= hid_data->height ? 0 : 1);
 		}
 	}
-}
-
-static bool wacom_wac_slot_is_active(struct input_dev *dev, int key)
-{
-	struct input_mt *mt = dev->mt;
-	struct input_mt_slot *s;
-
-	if (!mt)
-		return false;
-
-	for (s = mt->slots; s != mt->slots + mt->num_slots; s++) {
-		if (s->key == key &&
-			input_mt_get_value(s, ABS_MT_TRACKING_ID) >= 0) {
-			return true;
-		}
-	}
-
-	return false;
 }
 
 static void wacom_wac_finger_event(struct hid_device *hdev,
@@ -2769,14 +2750,8 @@ static void wacom_wac_finger_event(struct hid_device *hdev,
 	}
 
 	if (usage->usage_index + 1 == field->report_count) {
-		if (equivalent_usage == wacom_wac->hid_data.last_slot_field) {
-			bool touch_removed = wacom_wac_slot_is_active(wacom_wac->touch_input,
-				wacom_wac->hid_data.id) && !wacom_wac->hid_data.tipswitch;
-
-			if (wacom_wac->hid_data.confidence || touch_removed) {
-				wacom_wac_finger_slot(wacom_wac, wacom_wac->touch_input);
-			}
-		}
+		if (equivalent_usage == wacom_wac->hid_data.last_slot_field)
+			wacom_wac_finger_slot(wacom_wac, wacom_wac->touch_input);
 	}
 }
 

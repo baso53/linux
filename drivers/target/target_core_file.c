@@ -332,11 +332,13 @@ static int fd_do_rw(struct se_cmd *cmd, struct file *fd,
 	}
 
 	iov_iter_bvec(&iter, is_write, bvec, sgl_nents, len);
-	if (is_write)
+	if (is_write) {
+		file_start_write(fd);
 		ret = vfs_iter_write(fd, &iter, &pos, 0);
-	else
+		file_end_write(fd);
+	} else {
 		ret = vfs_iter_read(fd, &iter, &pos, 0);
-
+	}
 	if (is_write) {
 		if (ret < 0 || ret != data_length) {
 			pr_err("%s() write returned %d\n", __func__, ret);
@@ -467,7 +469,9 @@ fd_execute_write_same(struct se_cmd *cmd)
 	}
 
 	iov_iter_bvec(&iter, ITER_SOURCE, bvec, nolb, len);
+	file_start_write(fd_dev->fd_file);
 	ret = vfs_iter_write(fd_dev->fd_file, &iter, &pos, 0);
+	file_end_write(fd_dev->fd_file);
 
 	kfree(bvec);
 	if (ret < 0 || ret != len) {
@@ -896,7 +900,7 @@ static void fd_free_prot(struct se_device *dev)
 	fd_dev->fd_prot_file = NULL;
 }
 
-static struct sbc_ops fd_sbc_ops = {
+static struct exec_cmd_ops fd_exec_cmd_ops = {
 	.execute_rw		= fd_execute_rw,
 	.execute_sync_cache	= fd_execute_sync_cache,
 	.execute_write_same	= fd_execute_write_same,
@@ -906,7 +910,7 @@ static struct sbc_ops fd_sbc_ops = {
 static sense_reason_t
 fd_parse_cdb(struct se_cmd *cmd)
 {
-	return sbc_parse_cdb(cmd, &fd_sbc_ops);
+	return sbc_parse_cdb(cmd, &fd_exec_cmd_ops);
 }
 
 static const struct target_backend_ops fileio_ops = {
